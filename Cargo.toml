@@ -1,0 +1,13 @@
+[package]
+name = "video-player"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.100"
+crossbeam-channel = "0.5.15"
+ffmpeg-sys-next = { version = "8.0.1", features = ["default"] }
+slint = "1.13.1"
+
+[build-dependencies]
+slint-build = "1.13.1"

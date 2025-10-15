@@ -1,0 +1,14 @@
+export component VideoPlayer inherits Window {
+    title: "Video Player";
+    preferred-width: 1280px;
+    preferred-height: 720px;
+    
+    in-out property <image> video_frame;
+    
+    video_frame_image := Image {
+        width: 100%;
+        height: 100%;
+        source: video_frame;
+        image-fit: contain;
+    }
+}
