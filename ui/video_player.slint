@@ -1,14 +1,221 @@
+import { Slider, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
 export component VideoPlayer inherits Window {
     title: "Video Player";
     preferred-width: 1280px;
     preferred-height: 720px;
+    background: #000;
     
+    // Video properties
     in-out property <image> video_frame;
+    in-out property <bool> is_playing: false;
+    in-out property <bool> is_muted: false;
+    in-out property <bool> is_fullscreen: false;
+    in-out property <float> video_position: 0.0;  // 0.0 to 1.0
+    in-out property <float> video_duration: 100.0;  // in seconds
+    in-out property <float> current_time: 0.0;  // in seconds
+    in-out property <float> volume: 1.0;  // 0.0 to 1.0
     
-    video_frame_image := Image {
-        width: 100%;
-        height: 100%;
-        source: video_frame;
-        image-fit: contain;
+    // Callbacks
+    callback play_pause_clicked();
+    callback seek_changed(float);
+    callback volume_changed(float);
+    callback mute_clicked();
+    callback fullscreen_clicked();
+    
+    // Helper function for time formatting
+    pure function format_time(seconds: float) -> string {
+        let mins = floor(seconds / 60);
+        let secs = floor(mod(seconds, 60));
+        return mins + ":" + (secs < 10 ? "0" : "") + secs;
+    }
+
+    
+    VerticalBox {
+        // Video display area
+        Rectangle {
+            vertical-stretch: 1;
+            background: #000;
+            
+            video_frame_image := Image {
+                width: 100%;
+                height: 100%;
+                source: video_frame;
+                image-fit: contain;
+            }
+            
+            // Show controls on hover
+            controls_overlay := Rectangle {
+                width: 100%;
+                height: 100%;
+                background: transparent;
+                
+                states [
+                    hover when touch_area.has-hover: {
+                        controls_container.opacity: 1.0;
+                    }
+                ]
+                
+                touch_area := TouchArea {
+                    width: 100%;
+                    height: 100%;
+                }
+                
+                // Controls container at the bottom
+                controls_container := Rectangle {
+                    y: parent.height - self.height;
+                    width: 100%;
+                    height: 80px;
+                    background: @linear-gradient(180deg, #00000000 0%, #000000CC 100%);
+                    opacity: 0.0;
+                    
+                    animate opacity { 
+                        duration: 200ms; 
+                        easing: ease-in-out;
+                    }
+                    
+                    VerticalBox {
+                        padding: 10px;
+                        spacing: 5px;
+                        
+                        // Progress bar
+                        HorizontalBox {
+                            spacing: 10px;
+                            alignment: center;
+                            
+                            // Current time
+                            Text {
+                                text: format_time(current_time);
+                                color: white;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                            
+                            // Seek slider
+                            seek_slider := Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0;
+                                maximum: video_duration;
+                                value: current_time;
+                                
+                                changed => {
+                                    seek_changed(self.value);
+                                }
+                            }
+                            
+                            // Duration
+                            Text {
+                                text: format_time(video_duration);
+                                color: white;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        
+                        // Control buttons
+                        HorizontalBox {
+                            spacing: 15px;
+                            alignment: start;
+                            
+                            // Play/Pause button
+                            Rectangle {
+                                width: 36px;
+                                height: 36px;
+                                
+                                TouchArea {
+                                    width: 100%;
+                                    height: 100%;
+                                    clicked => { play_pause_clicked(); }
+                                    
+                                    mouse-cursor: pointer;
+                                }
+                                
+                                if !is_playing: Image {
+                                    width: 100%;
+                                    height: 100%;
+                                    source: @image-url("assets/play.svg");
+                                }
+                                
+                                if is_playing: Image {
+                                    width: 500%;
+                                    height: 500%;
+                                    source: @image-url("assets/pause.svg");
+                                }
+                            }
+                            
+                            // Mute button
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                
+                                TouchArea {
+                                    width: 100%;
+                                    height: 100%;
+                                    clicked => { mute_clicked(); }
+                                    
+                                    mouse-cursor: pointer;
+                                }
+                                
+                                if !is_muted: Image {
+                                    width: 100%;
+                                    height: 100%;
+                                    source: @image-url("assets/mute.svg");
+                                }
+                                
+                                if is_muted: Image {
+                                    width: 100%;
+                                    height: 100%;
+                                    source: @image-url("assets/unmute.svg");
+                                }
+                            }
+                            
+                            // Volume slider
+                            volume_slider := Slider {
+                                width: 100px;
+                                minimum: 0;
+                                maximum: 100;
+                                value: volume * 100;
+                                enabled: !is_muted;
+                                
+                                changed => {
+                                    volume_changed(self.value / 100);
+                                }
+                            }
+                            
+                            // Spacer
+                            Rectangle {
+                                horizontal-stretch: 1;
+                            }
+                            
+                            // Fullscreen button
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                
+                                TouchArea {
+                                    width: 100%;
+                                    height: 100%;
+                                    clicked => { fullscreen_clicked(); }
+                                    
+                                    mouse-cursor: pointer;
+                                }
+                                
+                                if !is_fullscreen: Image {
+                                    width: 100%;
+                                    height: 100%;
+                                    source: @image-url("assets/fullscreen.svg");
+                                }
+                                
+                                if is_fullscreen: Image {
+                                    width: 100%;
+                                    height: 100%;
+                                    source: @image-url("assets/minimize.svg");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

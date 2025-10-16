@@ -4,24 +4,55 @@ use ffmpeg_sys_next::SwsFlags::SWS_BILINEAR;
 use ffmpeg_sys_next::{
     AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX, AV_ERROR_MAX_STRING_SIZE, AV_NOPTS_VALUE, AVBufferRef,
     AVCodec, AVCodecContext, AVCodecParameters, AVERROR_EOF, AVFormatContext, AVFrame,
-    AVHWDeviceType, AVMediaType, AVPacket, AVPixelFormat, av_buffer_ref, av_buffer_unref,
-    av_frame_alloc, av_frame_copy_props, av_frame_free, av_frame_unref, av_hwdevice_ctx_create,
-    av_hwframe_transfer_data, av_packet_alloc, av_packet_free, av_packet_unref, av_read_frame,
-    av_strerror, avcodec_alloc_context3, avcodec_find_decoder, avcodec_free_context,
-    avcodec_get_hw_config, avcodec_open2, avcodec_parameters_to_context, avcodec_receive_frame,
-    avcodec_send_packet, avformat_close_input, avformat_find_stream_info, avformat_open_input,
-    sws_freeContext, sws_getContext, sws_scale,
+    AVHWDeviceType, AVMediaType, AVPacket, AVPixelFormat, AVSEEK_FLAG_BACKWARD, av_buffer_ref,
+    av_buffer_unref, av_frame_alloc, av_frame_copy_props, av_frame_free, av_frame_unref,
+    av_hwdevice_ctx_create, av_hwframe_transfer_data, av_packet_alloc, av_packet_free,
+    av_packet_unref, av_read_frame, av_seek_frame, av_strerror, avcodec_alloc_context3,
+    avcodec_find_decoder, avcodec_flush_buffers, avcodec_free_context, avcodec_get_hw_config,
+    avcodec_open2, avcodec_parameters_to_context, avcodec_receive_frame, avcodec_send_packet,
+    avformat_close_input, avformat_find_stream_info, avformat_open_input, sws_freeContext,
+    sws_getContext, sws_scale,
 };
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use std::env;
 use std::ffi::{CStr, CString};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 slint::include_modules!();
 
 const AVERROR_EAGAIN: i32 = -11;
+
+/// Player control commands
+enum PlayerCommand {
+    Play,
+    Pause,
+    Seek(f64),      // Seek to position in seconds
+    SetVolume(f64), // 0.0 to 1.0
+    Stop,
+}
+
+/// Player state shared between threads
+struct PlayerState {
+    is_playing: AtomicBool,
+    is_muted: AtomicBool,
+    volume: Arc<Mutex<f64>>,
+    seek_target: Arc<Mutex<Option<f64>>>,
+}
+
+impl PlayerState {
+    fn new() -> Self {
+        PlayerState {
+            is_playing: AtomicBool::new(false),
+            is_muted: AtomicBool::new(false),
+            volume: Arc::new(Mutex::new(1.0)),
+            seek_target: Arc::new(Mutex::new(None)),
+        }
+    }
+}
 
 /// Represents a decoded video frame ready for display
 struct DecodedFrame {
@@ -420,8 +451,42 @@ impl VideoDecoder {
         }
     }
 
+    /// Seek to a specific position in the video
+    fn seek(&mut self, position_seconds: f64) -> Result<()> {
+        unsafe {
+            let stream = *(*self.format_ctx.as_ptr())
+                .streams
+                .add(self.video_stream_idx);
+            let time_base = (*stream).time_base;
+
+            // Convert seconds to stream time base
+            let seek_target = (position_seconds / self.time_base) as i64;
+
+            let ret = av_seek_frame(
+                self.format_ctx.as_ptr(),
+                self.video_stream_idx as i32,
+                seek_target,
+                AVSEEK_FLAG_BACKWARD,
+            );
+
+            if ret < 0 {
+                return Err(anyhow!("Failed to seek: {}", av_err2str(ret)));
+            }
+
+            // Flush codec buffers after seeking
+            avcodec_flush_buffers(self.codec_ctx.as_ptr());
+
+            Ok(())
+        }
+    }
+
     /// Decode the video and send frames to the UI thread
-    fn decode_video(mut self, sender: &Sender<DecodedFrame>) -> Result<()> {
+    fn decode_video(
+        mut self,
+        sender: &Sender<DecodedFrame>,
+        command_receiver: &Receiver<PlayerCommand>,
+        state: Arc<PlayerState>,
+    ) -> Result<()> {
         unsafe {
             let packet = Packet::new()?;
             let frame = Frame::new()?;
@@ -433,9 +498,50 @@ impl VideoDecoder {
 
             let fmt_ctx = self.format_ctx.as_ptr();
             let mut frame_count = 0u64;
+            let mut is_paused = false;
 
             // Main decoding loop
             loop {
+                // Check for commands
+                while let Ok(cmd) = command_receiver.try_recv() {
+                    match cmd {
+                        PlayerCommand::Play => {
+                            is_paused = false;
+                            state.is_playing.store(true, Ordering::Relaxed);
+                        }
+                        PlayerCommand::Pause => {
+                            is_paused = true;
+                            state.is_playing.store(false, Ordering::Relaxed);
+                        }
+                        PlayerCommand::Seek(position) => {
+                            if let Err(e) = self.seek(position) {
+                                eprintln!("Seek failed: {}", e);
+                            }
+                        }
+                        PlayerCommand::SetVolume(vol) => {
+                            *state.volume.lock().unwrap() = vol;
+                        }
+                        PlayerCommand::Stop => {
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // If paused, sleep a bit and continue
+                if is_paused {
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+
+                // Check if a seek is requested
+                if let Some(seek_pos) = *state.seek_target.lock().unwrap() {
+                    *state.seek_target.lock().unwrap() = None;
+                    if let Err(e) = self.seek(seek_pos) {
+                        eprintln!("Seek failed: {}", e);
+                    }
+                    continue;
+                }
+
                 let ret = av_read_frame(fmt_ctx, packet.as_ptr());
                 if ret < 0 {
                     if ret == AVERROR_EOF {
@@ -653,6 +759,26 @@ impl VideoDecoder {
             }
         }
     }
+
+    /// Get video duration in seconds
+    fn get_duration(&self) -> f64 {
+        unsafe {
+            let stream = *(*self.format_ctx.as_ptr())
+                .streams
+                .add(self.video_stream_idx);
+
+            if (*stream).duration != AV_NOPTS_VALUE {
+                (*stream).duration as f64 * self.time_base
+            } else {
+                let fmt_ctx = &*self.format_ctx.as_ptr();
+                if fmt_ctx.duration != AV_NOPTS_VALUE {
+                    fmt_ctx.duration as f64 / 1_000_000.0 // Convert from microseconds
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
 }
 
 /// Convert `FFmpeg` error code to string
@@ -677,15 +803,25 @@ fn main() -> Result<()> {
     let decoder = VideoDecoder::new(video_path).context("Failed to create video decoder")?;
 
     let fps = decoder.get_fps();
+    let duration = decoder.get_duration();
     println!("Video FPS: {fps:.2}");
+    println!("Video Duration: {duration:.2} seconds");
 
-    // Create channel for frame communication
+    // Create shared state
+    let state = Arc::new(PlayerState::new());
+
+    // Create channels
     let (frame_sender, frame_receiver): (Sender<DecodedFrame>, Receiver<DecodedFrame>) =
         bounded(30);
+    let (command_sender, command_receiver): (Sender<PlayerCommand>, Receiver<PlayerCommand>) =
+        bounded(10);
+
+    // Clone state for decoder thread
+    let decoder_state = state.clone();
 
     // Spawn decoder thread
     thread::spawn(move || {
-        if let Err(e) = decoder.decode_video(&frame_sender) {
+        if let Err(e) = decoder.decode_video(&frame_sender, &command_receiver, decoder_state) {
             eprintln!("Decoder error: {e}");
         }
     });
@@ -693,26 +829,109 @@ fn main() -> Result<()> {
     // Create and run Slint UI
     let ui = VideoPlayer::new()?;
 
+    // Set initial UI state
+    ui.set_video_duration(duration as f32);
+    ui.set_current_time(0.0);
+    ui.set_is_playing(false);
+    ui.set_volume(1.0);
+
+    // Setup callbacks
+    let cmd_sender = command_sender.clone();
+    let state_clone = state.clone();
+    ui.on_play_pause_clicked(move || {
+        let is_playing = state_clone.is_playing.load(Ordering::Relaxed);
+        if is_playing {
+            let _ = cmd_sender.send(PlayerCommand::Pause);
+        } else {
+            let _ = cmd_sender.send(PlayerCommand::Play);
+        }
+    });
+
+    let state_clone = state.clone();
+    ui.on_seek_changed(move |position| {
+        *state_clone.seek_target.lock().unwrap() = Some(position as f64);
+    });
+
+    let cmd_sender = command_sender.clone();
+    let ui_handle_vol = ui.as_weak();
+    ui.on_volume_changed(move |volume| {
+        let _ = cmd_sender.send(PlayerCommand::SetVolume(volume as f64));
+        let _ = ui_handle_vol.upgrade_in_event_loop(move |handle| {
+            handle.set_volume(volume);
+        });
+    });
+
+    let ui_handle_mute = ui.as_weak();
+    let state_clone = state.clone();
+    ui.on_mute_clicked(move || {
+        let is_muted = state_clone.is_muted.load(Ordering::Relaxed);
+        state_clone.is_muted.store(!is_muted, Ordering::Relaxed);
+        let _ = ui_handle_mute.upgrade_in_event_loop(move |handle| {
+            handle.set_is_muted(!is_muted);
+        });
+    });
+
+    let ui_handle_fs = ui.as_weak();
+    ui.on_fullscreen_clicked(move || {
+        let _ = ui_handle_fs.upgrade_in_event_loop(|handle| {
+            let is_fullscreen = handle.get_is_fullscreen();
+            handle.set_is_fullscreen(!is_fullscreen);
+            // Note: Actual fullscreen implementation would require window management
+            // This is just toggling the UI state
+        });
+    });
+
     // Spawn frame update thread
     let ui_handle = ui.as_weak();
+    let display_state = state.clone();
     thread::spawn(move || {
         let mut start_time: Option<Instant> = None;
         let mut first_pts: Option<f64> = None;
+        let mut pause_time: Option<Instant> = None;
+        let mut accumulated_pause_time = Duration::ZERO;
 
         while let Ok(frame) = frame_receiver.recv() {
+            let is_playing = display_state.is_playing.load(Ordering::Relaxed);
+
             // Initialize timing on first frame
             if start_time.is_none() {
                 start_time = Some(Instant::now());
                 first_pts = Some(frame.pts);
             }
 
-            // Calculate target display time
-            let elapsed = start_time.unwrap().elapsed().as_secs_f64();
+            // Handle pause/resume timing
+            if !is_playing {
+                if pause_time.is_none() {
+                    pause_time = Some(Instant::now());
+                }
+                // Still update the frame but don't advance time
+                let data = frame.data;
+                let width = frame.width;
+                let height = frame.height;
+                let current_pts = frame.pts;
+
+                let _ = ui_handle.upgrade_in_event_loop(move |handle| {
+                    let pixel_buffer =
+                        SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&data, width, height);
+                    let image = Image::from_rgba8(pixel_buffer);
+                    handle.set_video_frame(image);
+                    handle.set_current_time(current_pts as f32);
+                    handle.set_is_playing(false);
+                });
+                continue;
+            } else if let Some(pause_start) = pause_time {
+                accumulated_pause_time += pause_start.elapsed();
+                pause_time = None;
+            }
+
+            // Calculate target display time accounting for pauses
+            let elapsed = start_time.unwrap().elapsed() - accumulated_pause_time;
+            let elapsed_secs = elapsed.as_secs_f64();
             let target_time = frame.pts - first_pts.unwrap();
 
             // Sleep if we're ahead of schedule
-            if target_time > elapsed {
-                let sleep_duration = Duration::from_secs_f64(target_time - elapsed);
+            if target_time > elapsed_secs {
+                let sleep_duration = Duration::from_secs_f64(target_time - elapsed_secs);
                 thread::sleep(sleep_duration);
             }
 
@@ -720,6 +939,7 @@ fn main() -> Result<()> {
             let data = frame.data;
             let width = frame.width;
             let height = frame.height;
+            let current_pts = frame.pts;
 
             // Create the image inside the event loop to avoid Send issues
             let _ = ui_handle.upgrade_in_event_loop(move |handle| {
@@ -727,10 +947,16 @@ fn main() -> Result<()> {
                     SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&data, width, height);
                 let image = Image::from_rgba8(pixel_buffer);
                 handle.set_video_frame(image);
+                handle.set_current_time(current_pts as f32);
+                handle.set_is_playing(true);
             });
         }
     });
 
     ui.run()?;
+
+    // Send stop command to decoder thread when UI closes
+    let _ = command_sender.send(PlayerCommand::Stop);
+
     Ok(())
 }
