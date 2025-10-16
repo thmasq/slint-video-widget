@@ -83,7 +83,7 @@ export component VideoPlayer inherits Window {
                 // --- Controls ---
                 controls_container := Rectangle {
                     width: 100%;
-                    height: 90px;
+                    height: 52px;
                     y: parent.height - self.height;
                     background: @linear-gradient(180deg, #00000000 0%, #000000CC 100%);
                     opacity: root.show_controls ? 1.0 : 0.0;
@@ -93,118 +93,106 @@ export component VideoPlayer inherits Window {
                         easing: ease-in-out;
                     }
 
-                    VerticalBox {
+                    HorizontalBox {
                         padding: 10px;
-                        spacing: 6px;
+                        spacing: 8px;
+                        width: 100%;
 
-                        // --- Seek Bar ---
-                        HorizontalBox {
-                            spacing: 10px;
-                            alignment: center;
+                        // Play / Pause Button
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
 
-                            Text {
-                                text: format_time(current_time);
-                                color: white;
-                                font-size: 12px;
-                                vertical-alignment: center;
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                clicked => { play_pause_clicked(); }
+                                mouse-cursor: pointer;
                             }
 
-                            seek_slider := Slider {
-                                width: 90%;
-                                minimum: 0;
-                                maximum: video_duration;
-                                value: current_time;
-                                changed => { seek_changed(self.value); }
-                            }
-
-                            Text {
-                                text: format_time(video_duration);
-                                color: white;
-                                font-size: 12px;
-                                vertical-alignment: center;
+                            Image {
+                                width: 100%;
+                                height: 100%;
+                                source: is_playing
+                                    ? @image-url("assets/pause.svg")
+                                    : @image-url("assets/play.svg");
                             }
                         }
 
-                        // --- Control Buttons ---
-                        HorizontalBox {
-                            spacing: 15px;
-                            alignment: center;
+                        // Current Time
+                        Text {
+                            text: format_time(current_time);
+                            color: white;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
 
-                            // Play / Pause
-                            Rectangle {
-                                width: 36px;
-                                height: 36px;
+                        // Seek Slider (Main expandable element)
+                        seek_slider := Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0;
+                            maximum: video_duration;
+                            value: current_time;
+                            changed => { seek_changed(self.value); }
+                        }
 
-                                TouchArea {
-                                    width: 100%;
-                                    height: 100%;
-                                    clicked => { play_pause_clicked(); }
-                                    mouse-cursor: pointer;
-                                }
+                        // Duration Time
+                        Text {
+                            text: format_time(video_duration);
+                            color: white;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
 
-                                Image {
-                                    width: 100%;
-                                    height: 100%;
-                                    source: is_playing
-                                        ? @image-url("assets/pause.svg")
-                                        : @image-url("assets/play.svg");
-                                }
+                        // Mute / Unmute Button
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                clicked => { mute_clicked(); }
+                                mouse-cursor: pointer;
                             }
 
-                            // Mute / Unmute
-                            Rectangle {
-                                width: 32px;
-                                height: 32px;
+                            Image {
+                                width: 100%;
+                                height: 100%;
+                                source: is_muted
+                                    ? @image-url("assets/unmute.svg")
+                                    : @image-url("assets/mute.svg");
+                            }
+                        }
 
-                                TouchArea {
-                                    width: 100%;
-                                    height: 100%;
-                                    clicked => { mute_clicked(); }
-                                    mouse-cursor: pointer;
-                                }
+                        // Volume Slider
+                        volume_slider := Slider {
+                            width: 100px;
+                            minimum: 0;
+                            maximum: 100;
+                            value: volume * 100;
+                            enabled: !is_muted;
+                            changed => { volume_changed(self.value / 100); }
+                        }
 
-                                Image {
-                                    width: 100%;
-                                    height: 100%;
-                                    source: is_muted
-                                        ? @image-url("assets/unmute.svg")
-                                        : @image-url("assets/mute.svg");
-                                }
+                        // Fullscreen Button
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                clicked => { fullscreen_clicked(); }
+                                mouse-cursor: pointer;
                             }
 
-                            // Volume Slider
-                            volume_slider := Slider {
-                                width: 100px;
-                                minimum: 0;
-                                maximum: 100;
-                                value: volume * 100;
-                                enabled: !is_muted;
-
-                                changed => { volume_changed(self.value / 100); }
-                            }
-
-                            // Spacer
-                            Rectangle { horizontal-stretch: 1; }
-
-                            // Fullscreen
-                            Rectangle {
-                                width: 32px;
-                                height: 32px;
-
-                                TouchArea {
-                                    width: 100%;
-                                    height: 100%;
-                                    clicked => { fullscreen_clicked(); }
-                                    mouse-cursor: pointer;
-                                }
-
-                                Image {
-                                    width: 100%;
-                                    height: 100%;
-                                    source: is_fullscreen
-                                        ? @image-url("assets/minimize.svg")
-                                        : @image-url("assets/fullscreen.svg");
-                                }
+                            Image {
+                                width: 100%;
+                                height: 100%;
+                                source: is_fullscreen
+                                    ? @image-url("assets/minimize.svg")
+                                    : @image-url("assets/fullscreen.svg");
                             }
                         }
                     }
