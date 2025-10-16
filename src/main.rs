@@ -17,7 +17,7 @@ use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use std::env;
 use std::ffi::{CStr, CString};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,8 +30,8 @@ const AVERROR_EAGAIN: i32 = -11;
 enum PlayerCommand {
     Play,
     Pause,
-    Seek(f64),      // Seek to position in seconds
-    SetVolume(f64), // 0.0 to 1.0
+    Seek(u64),      // Seek to frame number
+    SetVolume(i32), // 0 to 100
     Stop,
 }
 
@@ -39,8 +39,8 @@ enum PlayerCommand {
 struct PlayerState {
     is_playing: AtomicBool,
     is_muted: AtomicBool,
-    volume: Arc<Mutex<f64>>,
-    seek_target: Arc<Mutex<Option<f64>>>,
+    volume: AtomicU64,                    // 0-100
+    seek_target: Arc<Mutex<Option<u64>>>, // Target frame number
 }
 
 impl PlayerState {
@@ -48,7 +48,7 @@ impl PlayerState {
         PlayerState {
             is_playing: AtomicBool::new(false),
             is_muted: AtomicBool::new(false),
-            volume: Arc::new(Mutex::new(1.0)),
+            volume: AtomicU64::new(100),
             seek_target: Arc::new(Mutex::new(None)),
         }
     }
@@ -62,8 +62,48 @@ struct DecodedFrame {
     width: u32,
     /// Frame height
     height: u32,
-    /// Presentation timestamp in seconds
-    pts: f64,
+    /// Frame number
+    frame_number: u64,
+}
+
+/// Video metadata for time conversions
+#[derive(Clone)]
+struct VideoMetadata {
+    fps_num: i32,
+    fps_den: i32,
+    total_frames: u64,
+    duration_ms: u64,
+}
+
+impl VideoMetadata {
+    /// Convert frame number to milliseconds
+    fn frame_to_ms(&self, frame: u64) -> u64 {
+        if self.fps_num == 0 {
+            return 0;
+        }
+        // ms = frame * 1000 * fps_den / fps_num
+        frame
+            .saturating_mul(1000)
+            .saturating_mul(self.fps_den as u64)
+            / (self.fps_num as u64)
+    }
+
+    /// Convert milliseconds to frame number
+    fn ms_to_frame(&self, ms: u64) -> u64 {
+        if self.fps_den == 0 {
+            return 0;
+        }
+        // frame = ms * fps_num / (1000 * fps_den)
+        ms.saturating_mul(self.fps_num as u64) / (1000u64.saturating_mul(self.fps_den as u64))
+    }
+
+    /// Get frames per second as integer (rounded)
+    fn get_fps_rounded(&self) -> u64 {
+        if self.fps_den == 0 {
+            return 25;
+        }
+        ((self.fps_num as u64 * 1000) / (self.fps_den as u64) + 500) / 1000
+    }
 }
 
 /// RAII wrapper for `FFmpeg` format context
@@ -71,8 +111,6 @@ struct FormatContext {
     ctx: *mut AVFormatContext,
 }
 
-// SAFETY: FFmpeg contexts are safe to send between threads when not shared.
-// Each thread owns its context exclusively.
 unsafe impl Send for FormatContext {}
 
 impl FormatContext {
@@ -119,7 +157,6 @@ struct CodecContext {
     ctx: *mut AVCodecContext,
 }
 
-// SAFETY: Codec contexts are safe to send between threads when owned exclusively
 unsafe impl Send for CodecContext {}
 
 impl CodecContext {
@@ -205,7 +242,6 @@ struct SwsContext {
     ctx: *mut ffmpeg_sys_next::SwsContext,
 }
 
-// SAFETY: SwsContext is safe to send between threads when owned exclusively
 unsafe impl Send for SwsContext {}
 
 impl SwsContext {
@@ -227,7 +263,6 @@ struct HwDeviceContext {
     ctx: *mut AVBufferRef,
 }
 
-// SAFETY: Hardware device contexts use reference counting and are safe to send
 unsafe impl Send for HwDeviceContext {}
 
 impl Drop for HwDeviceContext {
@@ -247,8 +282,10 @@ struct VideoDecoder {
     hw_device_ctx: Option<HwDeviceContext>,
     video_stream_idx: usize,
     time_base: f64,
+    metadata: VideoMetadata,
     using_hw: bool,
     hw_pix_fmt: AVPixelFormat,
+    current_frame: u64,
 }
 
 impl VideoDecoder {
@@ -273,6 +310,46 @@ impl VideoDecoder {
             // Calculate time base for PTS conversion
             let time_base = f64::from((*stream).time_base.num) / f64::from((*stream).time_base.den);
 
+            // Get video metadata
+            let avg_frame_rate = (*stream).avg_frame_rate;
+            let fps_num = avg_frame_rate.num;
+            let fps_den = if avg_frame_rate.den > 0 {
+                avg_frame_rate.den
+            } else {
+                1
+            };
+
+            // Calculate duration and total frames
+            let duration_seconds = if (*stream).duration != AV_NOPTS_VALUE {
+                (*stream).duration as f64 * time_base
+            } else if fmt_ctx_ref.duration != AV_NOPTS_VALUE {
+                fmt_ctx_ref.duration as f64 / 1_000_000.0
+            } else {
+                0.0
+            };
+
+            let duration_ms = (duration_seconds * 1000.0) as u64;
+            let fps = if fps_den > 0 {
+                fps_num as f64 / fps_den as f64
+            } else {
+                25.0
+            };
+            let total_frames = (duration_seconds * fps) as u64;
+
+            let metadata = VideoMetadata {
+                fps_num,
+                fps_den,
+                total_frames,
+                duration_ms,
+            };
+
+            println!("Video FPS: {}/{} ({:.2} fps)", fps_num, fps_den, fps);
+            println!(
+                "Video Duration: {} ms ({:.2} seconds)",
+                duration_ms, duration_seconds
+            );
+            println!("Total Frames: {}", total_frames);
+
             // Find decoder
             let codec = avcodec_find_decoder((*codecpar).codec_id);
             if codec.is_null() {
@@ -290,8 +367,10 @@ impl VideoDecoder {
                 hw_device_ctx,
                 video_stream_idx,
                 time_base,
+                metadata,
                 using_hw,
                 hw_pix_fmt,
+                current_frame: 0,
             })
         }
     }
@@ -309,10 +388,7 @@ impl VideoDecoder {
 
             // Prefer specific hardware types based on platform
             #[cfg(target_os = "linux")]
-            let preferred_types = vec![
-                AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                // AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
-            ];
+            let preferred_types = vec![AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI];
 
             #[cfg(target_os = "windows")]
             let preferred_types = vec![
@@ -357,7 +433,6 @@ impl VideoDecoder {
                 );
 
                 if ret >= 0 {
-                    // Hardware context created successfully
                     let mut codec_ctx = avcodec_alloc_context3(codec);
                     if codec_ctx.is_null() {
                         av_buffer_unref(&raw mut hw_device_ctx);
@@ -373,7 +448,6 @@ impl VideoDecoder {
 
                     (*codec_ctx).hw_device_ctx = av_buffer_ref(hw_device_ctx);
 
-                    // Set the hardware pixel format callback for VAAPI
                     if hw_type == AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI {
                         extern "C" fn get_hw_format(
                             _ctx: *mut AVCodecContext,
@@ -382,7 +456,6 @@ impl VideoDecoder {
                             let mut p = pix_fmts;
                             unsafe {
                                 while *p != AVPixelFormat::AV_PIX_FMT_NONE {
-                                    // For VAAPI, we typically want VAAPI format
                                     if *p == AVPixelFormat::AV_PIX_FMT_VAAPI {
                                         return *p;
                                     }
@@ -416,7 +489,6 @@ impl VideoDecoder {
                         ));
                     }
 
-                    // Hardware decoder failed to open, clean up
                     avcodec_free_context(&raw mut codec_ctx);
                     av_buffer_unref(&raw mut hw_device_ctx);
                     println!("Hardware decoder failed to open, falling back to software");
@@ -451,16 +523,12 @@ impl VideoDecoder {
         }
     }
 
-    /// Seek to a specific position in the video
-    fn seek(&mut self, position_seconds: f64) -> Result<()> {
+    /// Seek to a specific frame
+    fn seek(&mut self, target_frame: u64) -> Result<()> {
         unsafe {
-            let stream = *(*self.format_ctx.as_ptr())
-                .streams
-                .add(self.video_stream_idx);
-            let time_base = (*stream).time_base;
-
-            // Convert seconds to stream time base
-            let seek_target = (position_seconds / self.time_base) as i64;
+            // Convert frame number to timestamp
+            let target_seconds = self.metadata.frame_to_ms(target_frame) as f64 / 1000.0;
+            let seek_target = (target_seconds / self.time_base) as i64;
 
             let ret = av_seek_frame(
                 self.format_ctx.as_ptr(),
@@ -473,8 +541,8 @@ impl VideoDecoder {
                 return Err(anyhow!("Failed to seek: {}", av_err2str(ret)));
             }
 
-            // Flush codec buffers after seeking
             avcodec_flush_buffers(self.codec_ctx.as_ptr());
+            self.current_frame = target_frame;
 
             Ok(())
         }
@@ -497,7 +565,6 @@ impl VideoDecoder {
             };
 
             let fmt_ctx = self.format_ctx.as_ptr();
-            let mut frame_count = 0u64;
             let mut is_paused = false;
 
             // Main decoding loop
@@ -513,13 +580,13 @@ impl VideoDecoder {
                             is_paused = true;
                             state.is_playing.store(false, Ordering::Relaxed);
                         }
-                        PlayerCommand::Seek(position) => {
-                            if let Err(e) = self.seek(position) {
+                        PlayerCommand::Seek(frame_num) => {
+                            if let Err(e) = self.seek(frame_num) {
                                 eprintln!("Seek failed: {}", e);
                             }
                         }
                         PlayerCommand::SetVolume(vol) => {
-                            *state.volume.lock().unwrap() = vol;
+                            state.volume.store(vol as u64, Ordering::Relaxed);
                         }
                         PlayerCommand::Stop => {
                             return Ok(());
@@ -527,16 +594,15 @@ impl VideoDecoder {
                     }
                 }
 
-                // If paused, sleep a bit and continue
                 if is_paused {
                     thread::sleep(Duration::from_millis(50));
                     continue;
                 }
 
                 // Check if a seek is requested
-                if let Some(seek_pos) = *state.seek_target.lock().unwrap() {
+                if let Some(seek_frame) = *state.seek_target.lock().unwrap() {
                     *state.seek_target.lock().unwrap() = None;
-                    if let Err(e) = self.seek(seek_pos) {
+                    if let Err(e) = self.seek(seek_frame) {
                         eprintln!("Seek failed: {}", e);
                     }
                     continue;
@@ -575,11 +641,8 @@ impl VideoDecoder {
                             return Err(anyhow!("Error decoding frame: {}", av_err2str(ret)));
                         }
 
-                        frame_count += 1;
-
                         // Get the actual frame to convert
                         let cpu_frame = if self.using_hw {
-                            // Transfer from GPU to CPU
                             let ret = av_hwframe_transfer_data(frame.as_ptr(), decode_frame, 0);
                             if ret < 0 {
                                 eprintln!("Failed to transfer frame from GPU: {}", av_err2str(ret));
@@ -587,9 +650,7 @@ impl VideoDecoder {
                                 continue;
                             }
 
-                            // Copy properties (pts, etc.)
                             av_frame_copy_props(frame.as_ptr(), decode_frame);
-
                             frame.as_ptr()
                         } else {
                             decode_frame
@@ -608,15 +669,16 @@ impl VideoDecoder {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Failed to convert frame {frame_count}: {e}");
+                                eprintln!("Failed to convert frame {}: {}", self.current_frame, e);
                             }
                         }
 
-                        // Unref frames
                         av_frame_unref(decode_frame);
                         if self.using_hw {
                             av_frame_unref(frame.as_ptr());
                         }
+
+                        self.current_frame += 1;
                     }
                 }
 
@@ -658,10 +720,15 @@ impl VideoDecoder {
                     if self.using_hw {
                         av_frame_unref(frame.as_ptr());
                     }
+
+                    self.current_frame += 1;
                 }
             }
 
-            println!("Decoder finished. Total frames processed: {frame_count}");
+            println!(
+                "Decoder finished. Total frames processed: {}",
+                self.current_frame
+            );
             Ok(())
         }
     }
@@ -677,7 +744,7 @@ impl VideoDecoder {
                 return Err(anyhow!("Invalid frame dimensions: {width}x{height}"));
             }
 
-            // Initialize SwsContext if needed (or reinitialize if format changed)
+            // Initialize SwsContext if needed
             if self.sws_ctx.is_none() {
                 println!(
                     "Creating SwsContext for format {} -> RGBA",
@@ -728,56 +795,17 @@ impl VideoDecoder {
                 return Err(anyhow!("Failed to convert frame: {}", av_err2str(ret)));
             }
 
-            // Calculate presentation timestamp
-            let pts = if frame_ref.pts == AV_NOPTS_VALUE {
-                0.0
-            } else {
-                frame_ref.pts as f64 * self.time_base
-            };
-
             Ok(DecodedFrame {
                 data: rgb_data,
                 width,
                 height,
-                pts,
+                frame_number: self.current_frame,
             })
         }
     }
 
-    /// Get video frame rate
-    fn get_fps(&self) -> f64 {
-        unsafe {
-            let stream = *(*self.format_ctx.as_ptr())
-                .streams
-                .add(self.video_stream_idx);
-            let avg_frame_rate = (*stream).avg_frame_rate;
-
-            if avg_frame_rate.den > 0 {
-                f64::from(avg_frame_rate.num) / f64::from(avg_frame_rate.den)
-            } else {
-                25.0 // Default fallback
-            }
-        }
-    }
-
-    /// Get video duration in seconds
-    fn get_duration(&self) -> f64 {
-        unsafe {
-            let stream = *(*self.format_ctx.as_ptr())
-                .streams
-                .add(self.video_stream_idx);
-
-            if (*stream).duration != AV_NOPTS_VALUE {
-                (*stream).duration as f64 * self.time_base
-            } else {
-                let fmt_ctx = &*self.format_ctx.as_ptr();
-                if fmt_ctx.duration != AV_NOPTS_VALUE {
-                    fmt_ctx.duration as f64 / 1_000_000.0 // Convert from microseconds
-                } else {
-                    0.0
-                }
-            }
-        }
+    fn get_metadata(&self) -> VideoMetadata {
+        self.metadata.clone()
     }
 }
 
@@ -801,11 +829,7 @@ fn main() -> Result<()> {
 
     // Create the video decoder
     let decoder = VideoDecoder::new(video_path).context("Failed to create video decoder")?;
-
-    let fps = decoder.get_fps();
-    let duration = decoder.get_duration();
-    println!("Video FPS: {fps:.2}");
-    println!("Video Duration: {duration:.2} seconds");
+    let metadata = decoder.get_metadata();
 
     // Create shared state
     let state = Arc::new(PlayerState::new());
@@ -829,11 +853,12 @@ fn main() -> Result<()> {
     // Create and run Slint UI
     let ui = VideoPlayer::new()?;
 
-    // Set initial UI state
-    ui.set_video_duration(duration as f32);
-    ui.set_current_time(0.0);
-    ui.set_is_playing(false);
-    ui.set_volume(1.0);
+    // Set initial UI state and start playing
+    ui.set_video_duration_ms(metadata.duration_ms as i32);
+    ui.set_current_time_ms(0);
+    ui.set_is_playing(true);
+    ui.set_volume(100);
+    state.is_playing.store(true, Ordering::Relaxed);
 
     // Setup callbacks
     let cmd_sender = command_sender.clone();
@@ -848,14 +873,16 @@ fn main() -> Result<()> {
     });
 
     let state_clone = state.clone();
-    ui.on_seek_changed(move |position| {
-        *state_clone.seek_target.lock().unwrap() = Some(position as f64);
+    let metadata_clone = metadata.clone();
+    ui.on_seek_changed(move |position_ms| {
+        let frame_num = metadata_clone.ms_to_frame(position_ms as u64);
+        *state_clone.seek_target.lock().unwrap() = Some(frame_num);
     });
 
     let cmd_sender = command_sender.clone();
     let ui_handle_vol = ui.as_weak();
     ui.on_volume_changed(move |volume| {
-        let _ = cmd_sender.send(PlayerCommand::SetVolume(volume as f64));
+        let _ = cmd_sender.send(PlayerCommand::SetVolume(volume));
         let _ = ui_handle_vol.upgrade_in_event_loop(move |handle| {
             handle.set_volume(volume);
         });
@@ -876,80 +903,45 @@ fn main() -> Result<()> {
         let _ = ui_handle_fs.upgrade_in_event_loop(|handle| {
             let is_fullscreen = handle.get_is_fullscreen();
             handle.set_is_fullscreen(!is_fullscreen);
-            // Note: Actual fullscreen implementation would require window management
-            // This is just toggling the UI state
         });
     });
 
-    // Spawn frame update thread
+    // Spawn frame update thread with FPS-based timing
     let ui_handle = ui.as_weak();
     let display_state = state.clone();
+    let fps = metadata.get_fps_rounded();
+    let frame_interval = Duration::from_millis(1000 / fps);
+
     thread::spawn(move || {
-        let mut start_time: Option<Instant> = None;
-        let mut first_pts: Option<f64> = None;
-        let mut pause_time: Option<Instant> = None;
-        let mut accumulated_pause_time = Duration::ZERO;
-
         while let Ok(frame) = frame_receiver.recv() {
+            let frame_start = Instant::now();
             let is_playing = display_state.is_playing.load(Ordering::Relaxed);
-
-            // Initialize timing on first frame
-            if start_time.is_none() {
-                start_time = Some(Instant::now());
-                first_pts = Some(frame.pts);
-            }
-
-            // Handle pause/resume timing
-            if !is_playing {
-                if pause_time.is_none() {
-                    pause_time = Some(Instant::now());
-                }
-                // Still update the frame but don't advance time
-                let data = frame.data;
-                let width = frame.width;
-                let height = frame.height;
-                let current_pts = frame.pts;
-
-                let _ = ui_handle.upgrade_in_event_loop(move |handle| {
-                    let pixel_buffer =
-                        SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&data, width, height);
-                    let image = Image::from_rgba8(pixel_buffer);
-                    handle.set_video_frame(image);
-                    handle.set_current_time(current_pts as f32);
-                    handle.set_is_playing(false);
-                });
-                continue;
-            } else if let Some(pause_start) = pause_time {
-                accumulated_pause_time += pause_start.elapsed();
-                pause_time = None;
-            }
-
-            // Calculate target display time accounting for pauses
-            let elapsed = start_time.unwrap().elapsed() - accumulated_pause_time;
-            let elapsed_secs = elapsed.as_secs_f64();
-            let target_time = frame.pts - first_pts.unwrap();
-
-            // Sleep if we're ahead of schedule
-            if target_time > elapsed_secs {
-                let sleep_duration = Duration::from_secs_f64(target_time - elapsed_secs);
-                thread::sleep(sleep_duration);
-            }
 
             // Capture frame data for moving into the closure
             let data = frame.data;
             let width = frame.width;
             let height = frame.height;
-            let current_pts = frame.pts;
+            let frame_ms = metadata.frame_to_ms(frame.frame_number);
 
-            // Create the image inside the event loop to avoid Send issues
+            // Create the image inside the event loop
             let _ = ui_handle.upgrade_in_event_loop(move |handle| {
                 let pixel_buffer =
                     SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&data, width, height);
                 let image = Image::from_rgba8(pixel_buffer);
                 handle.set_video_frame(image);
-                handle.set_current_time(current_pts as f32);
-                handle.set_is_playing(true);
+                handle.set_current_time_ms(frame_ms as i32);
+                handle.set_is_playing(is_playing);
             });
+
+            // Enforce frame timing
+            if is_playing {
+                let elapsed = frame_start.elapsed();
+                if elapsed < frame_interval {
+                    thread::sleep(frame_interval - elapsed);
+                }
+            } else {
+                thread::sleep(Duration::from_millis(10));
+            }
         }
     });
 

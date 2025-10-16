@@ -11,22 +11,22 @@ export component VideoPlayer inherits Window {
     in-out property <bool> is_playing: false;
     in-out property <bool> is_muted: false;
     in-out property <bool> is_fullscreen: false;
-    in-out property <float> video_position: 0.0;
-    in-out property <float> video_duration: 100.0;
-    in-out property <float> current_time: 0.0;
-    in-out property <float> volume: 1.0;
+    in-out property <int> video_duration_ms: 100000;
+    in-out property <int> current_time_ms: 0;
+    in-out property <int> volume: 100;
 
     // === CALLBACKS ===
     callback play_pause_clicked();
-    callback seek_changed(float);
-    callback volume_changed(float);
+    callback seek_changed(int);
+    callback volume_changed(int);
     callback mute_clicked();
     callback fullscreen_clicked();
 
     // === HELPERS ===
-    pure function format_time(seconds: float) -> string {
-        let mins = floor(seconds / 60);
-        let secs = floor(mod(seconds, 60));
+    pure function format_time(ms: int) -> string {
+        let total_seconds = floor(ms / 1000);
+        let mins = floor(total_seconds / 60);
+        let secs = floor(mod(total_seconds, 60));
         return mins + ":" + (secs < 10 ? "0" : "") + secs;
     }
 
@@ -121,7 +121,7 @@ export component VideoPlayer inherits Window {
 
                         // Current Time
                         Text {
-                            text: format_time(current_time);
+                            text: format_time(current_time_ms);
                             color: white;
                             font-size: 12px;
                             vertical-alignment: center;
@@ -131,14 +131,14 @@ export component VideoPlayer inherits Window {
                         seek_slider := Slider {
                             horizontal-stretch: 1;
                             minimum: 0;
-                            maximum: video_duration;
-                            value: current_time;
+                            maximum: video_duration_ms;
+                            value: current_time_ms;
                             changed => { seek_changed(self.value); }
                         }
 
                         // Duration Time
                         Text {
-                            text: format_time(video_duration);
+                            text: format_time(video_duration_ms);
                             color: white;
                             font-size: 12px;
                             vertical-alignment: center;
@@ -170,9 +170,9 @@ export component VideoPlayer inherits Window {
                             width: 100px;
                             minimum: 0;
                             maximum: 100;
-                            value: volume * 100;
+                            value: volume;
                             enabled: !is_muted;
-                            changed => { volume_changed(self.value / 100); }
+                            changed => { volume_changed(self.value); }
                         }
 
                         // Fullscreen Button
