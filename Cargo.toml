@@ -5,8 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
-crossbeam-channel = "0.5.15"
-ffmpeg-sys-next = { version = "8.0.1", features = ["default"] }
+gstreamer = "0.24.2"
+gstreamer-app = "0.24.2"
+gstreamer-video = "0.24.2"
+glib = "0.21.3"
 slint = "1.13.1"
 
 [build-dependencies]
