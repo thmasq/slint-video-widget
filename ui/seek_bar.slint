@@ -15,10 +15,11 @@ export component SeekBar inherits Rectangle {
 
     // === Internal Implementation ===
     height: 30px;
+    property <bool> dragging: false;
+
     // Convert duration to a float percentage for the slider
     private property <float> _value-as-percent: (value / 1ms) / (total-duration / 1ms);
     private property <float> _buffer-as-percent: (buffer-duration / 1ms) / (total-duration / 1ms);
-
     // Buffer health bar
     Rectangle {
         background: #666;
@@ -34,27 +35,35 @@ export component SeekBar inherits Rectangle {
         minimum: 0;
         maximum: 1.0;
         value: _value-as-percent;
-        changed(new_value) => {
-            root.value = total-duration * new_value;
-            root.scrubbed(root.value);
-        }
-
-        released => {
-            root.released(root.value);
-        }
     }
 
     touch_area := TouchArea {
         width: 100%;
         height: 100%;
         mouse-cursor: pointer;
-        clicked() => {
-            let new_percent = clamp(self.mouse-x / parent.width, 0, 1.0);
-            let new_value = total-duration * new_percent;
 
-            root.value = new_value;
-            root.scrubbed(root.value);
-            root.released(root.value);
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down) {
+                root.dragging = true;
+                let new_percent = clamp(self.mouse-x / parent.width, 0, 1.0);
+                let new_value = total-duration * new_percent;
+                root.value = new_value;
+                root.scrubbed(root.value);
+            } else if (event.kind == PointerEventKind.up) {
+                if (root.dragging) {
+                    root.released(root.value);
+                    root.dragging = false;
+                }
+            }
+        }
+
+        moved => {
+            if (root.dragging) {
+                let new_percent = clamp(self.mouse-x / parent.width, 0, 1.0);
+                let new_value = total-duration * new_percent;
+                root.value = new_value;
+                root.scrubbed(root.value);
+            }
         }
     }
 }

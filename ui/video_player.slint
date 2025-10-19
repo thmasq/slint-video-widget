@@ -169,9 +169,11 @@ export component VideoPlayerUI inherits Window {
                             }
                         }
 
-                        Rectangle {
+                        volume-control := Rectangle {
                             width: 100px;
                             height: 32px;
+                            
+                            property <bool> dragging: false;
 
                             volume_slider := Slider {
                                 width: 100%;
@@ -180,15 +182,29 @@ export component VideoPlayerUI inherits Window {
                                 maximum: 100;
                                 value: volume;
                                 enabled: !is_muted;
-                                changed => { volume_changed(self.value); }
                             }
                             TouchArea {
                                 width: 100%;
                                 height: 100%;
                                 mouse-cursor: pointer;
-                                clicked() => {
-                                    root.volume = clamp(self.mouse-x / parent.width, 0, 1.0) * 100;
-                                    volume_changed(root.volume);
+                                
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.down) {
+                                        parent.dragging = true;
+                                        let new_volume = clamp(self.mouse-x / parent.width * 100, 0, 100);
+                                        root.volume = new_volume;
+                                        volume_changed(new_volume);
+                                    } else if (event.kind == PointerEventKind.up) {
+                                        parent.dragging = false;
+                                    }
+                                }
+                                
+                                moved => {
+                                    if (parent.dragging) {
+                                        let new_volume = clamp(self.mouse-x / parent.width * 100, 0, 100);
+                                        root.volume = new_volume;
+                                        volume_changed(new_volume);
+                                    }
                                 }
                             }
                         }
