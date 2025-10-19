@@ -1,0 +1,49 @@
+// seek_bar.slint
+
+import { Slider } from "std-widgets.slint";
+
+export component SeekBar inherits Rectangle {
+    // === Public API ===
+    in property <bool> enabled: true;
+    out property <bool> has-focus: seek-slider.has-focus;
+
+    in-out property <duration> value: 0s;
+    in property <duration> buffer-duration: 0s;
+    in property <duration> total-duration: 1s;
+
+    callback scrubbed(duration);
+    callback released(duration);
+
+    // === Internal Implementation ===
+    height: 30px;
+    
+    // Convert duration to a float percentage for the slider
+    private property <float> _value-as-percent: (value / 1ms) / (total-duration / 1ms);
+    private property <float> _buffer-as-percent: (buffer-duration / 1ms) / (total-duration / 1ms);
+
+    // Buffer health bar
+    Rectangle {
+        background: #666;
+        width: parent.width * _buffer-as-percent;
+        height: 100%;
+        border-radius: 4px;
+    }
+
+    seek-slider := Slider {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        minimum: 0;
+        maximum: 1.0;
+        value: _value-as-percent;
+
+        changed(new_value) => {
+            root.value = total-duration * new_value;
+            root.scrubbed(root.value);
+        }
+
+        released => {
+            root.released(root.value);
+        }
+    }
+}

@@ -95,7 +95,7 @@ impl VideoPlayer {
         // Get duration
         let duration = pipeline
             .query_duration::<gst::ClockTime>()
-            .and_then(|d| Some(d.mseconds()))
+            .map(|d| d.mseconds())
             .unwrap_or(0);
 
         println!("Video info:");
@@ -206,7 +206,7 @@ impl VideoPlayer {
                     gst::MessageView::Eos(..) => {
                         println!("End of stream");
                         self.is_eos.store(true, Ordering::Relaxed);
-                        return false;
+                        self.pause();
                     }
                     _ => {}
                 }
@@ -257,7 +257,13 @@ fn main() -> Result<()> {
     let player_clone = player.clone();
     ui.on_play_pause_clicked(move || {
         let p = player_clone.lock().unwrap();
-        if p.is_playing.load(Ordering::Relaxed) {
+        if p.is_eos.load(Ordering::Relaxed) {
+            if let Err(e) = p.seek(0) {
+                eprintln!("Seek failed: {}", e);
+            }
+            p.is_eos.store(false, Ordering::Relaxed);
+            p.play();
+        } else if p.is_playing.load(Ordering::Relaxed) {
             p.pause();
         } else {
             p.play();
@@ -270,6 +276,9 @@ fn main() -> Result<()> {
         let p = player_clone.lock().unwrap();
         if let Err(e) = p.seek(position_ms as i64) {
             eprintln!("Seek failed: {}", e);
+        }
+        if p.is_eos.load(Ordering::Relaxed) {
+            p.is_eos.store(false, Ordering::Relaxed);
         }
     });
 

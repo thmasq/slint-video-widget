@@ -1,4 +1,5 @@
 import { Slider, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { SeekBar } from "seek_bar.slint";
 
 export component VideoPlayerUI inherits Window {
     title: "Video Player";
@@ -128,12 +129,15 @@ export component VideoPlayerUI inherits Window {
                         }
 
                         // Seek Slider (Main expandable element)
-                        seek_slider := Slider {
+                        seek-bar := SeekBar {
                             horizontal-stretch: 1;
-                            minimum: 0;
-                            maximum: video_duration_ms;
-                            value: current_time_ms;
-                            changed => { seek_changed(self.value); }
+                            total-duration: video_duration_ms * 1ms;
+                            value: current_time_ms * 1ms;
+                            // buffer-duration: buffer_health_ms * 1ms;
+
+                            scrubbed(duration) => {
+                                seek_changed(duration / 1ms);
+                            }
                         }
 
                         // Duration Time
