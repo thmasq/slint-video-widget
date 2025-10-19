@@ -1,9 +1,8 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use glib::prelude::*;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
-use gstreamer_video as gst_video;
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,6 +29,7 @@ struct VideoPlayer {
     framerate: f64,
     is_playing: Arc<AtomicBool>,
     is_eos: Arc<AtomicBool>,
+    volume_element: gst::Element,
 }
 
 impl VideoPlayer {
@@ -40,8 +40,9 @@ impl VideoPlayer {
         // Create the pipeline
         // Using decodebin for automatic codec selection and videoconvert for format conversion
         let pipeline_str = format!(
-            "filesrc location=\"{}\" ! decodebin ! videoconvert ! videoscale ! \
-             appsink name=sink caps=video/x-raw,format=RGBA,pixel-aspect-ratio=1/1",
+            "filesrc location=\"{}\" ! decodebin name=d ! videoconvert ! videoscale ! \
+             appsink name=sink caps=video/x-raw,format=RGBA,pixel-aspect-ratio=1/1 \
+             d. ! audioconvert ! volume name=audio-volume ! autoaudiosink",
             path
         );
 
@@ -55,6 +56,10 @@ impl VideoPlayer {
             .ok_or_else(|| anyhow!("Failed to get appsink"))?
             .downcast::<gst_app::AppSink>()
             .map_err(|_| anyhow!("Failed to cast to AppSink"))?;
+
+        let volume_element = pipeline
+            .by_name("audio-volume")
+            .ok_or_else(|| anyhow!("Failed to get volume element"))?;
 
         // Configure appsink
         appsink.set_property("drop", true);
@@ -107,6 +112,7 @@ impl VideoPlayer {
             framerate: fps,
             is_playing: Arc::new(AtomicBool::new(false)),
             is_eos: Arc::new(AtomicBool::new(false)),
+            volume_element,
         })
     }
 
@@ -142,11 +148,11 @@ impl VideoPlayer {
     }
 
     fn set_volume(&self, volume: f64) {
-        self.pipeline.set_property("volume", volume);
+        self.volume_element.set_property("volume", volume);
     }
 
     fn set_muted(&self, muted: bool) {
-        self.pipeline.set_property("mute", muted);
+        self.volume_element.set_property("mute", muted);
     }
 
     /// Pull a frame from the appsink
