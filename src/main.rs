@@ -32,10 +32,40 @@ struct VideoPlayer {
     volume_element: gst::Element,
 }
 
+fn configure_hw_acceleration() -> Result<()> {
+    let registry = gst::Registry::get();
+
+    // Increase rank of hardware-accelerated decoders
+    let hw_decoders = [
+        // VAAPI (Intel/AMD)
+        ("vaapih264dec", gst::Rank::PRIMARY + 1),
+        ("vaapih265dec", gst::Rank::PRIMARY + 1),
+        ("vaapivp9dec", gst::Rank::PRIMARY + 1),
+        ("vaapiav1dec", gst::Rank::PRIMARY + 1),
+        ("vaapimpeg2dec", gst::Rank::PRIMARY + 1),
+        // NVDEC (NVIDIA)
+        ("nvh264dec", gst::Rank::PRIMARY + 1),
+        ("nvh265dec", gst::Rank::PRIMARY + 1),
+        ("nvvp9dec", gst::Rank::PRIMARY + 1),
+        // VA-API postprocessing
+        ("vaapipostproc", gst::Rank::PRIMARY + 1),
+    ];
+
+    for (name, rank) in hw_decoders.iter() {
+        if let Some(feature) = registry.lookup_feature(name) {
+            feature.set_rank(*rank);
+        }
+    }
+
+    Ok(())
+}
+
 impl VideoPlayer {
     fn new(path: &str) -> Result<Self> {
         // Initialize GStreamer
         gst::init()?;
+
+        configure_hw_acceleration()?;
 
         // Create the pipeline
         // Using decodebin for automatic codec selection and videoconvert for format conversion
