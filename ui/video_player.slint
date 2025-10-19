@@ -12,20 +12,20 @@ export component VideoPlayerUI inherits Window {
     in-out property <bool> is_playing: false;
     in-out property <bool> is_muted: false;
     in-out property <bool> is_fullscreen: false;
-    in-out property <int> video_duration_ms: 100000;
-    in-out property <int> current_time_ms: 0;
+    in-out property <duration> video_duration: 100000ms;
+    in-out property <duration> current_time: 0ms;
     in-out property <int> volume: 100;
 
     // === CALLBACKS ===
     callback play_pause_clicked();
-    callback seek_changed(int);
+    callback seek_changed(/* position_ms */ int);
     callback volume_changed(int);
     callback mute_clicked();
     callback fullscreen_clicked();
 
     // === HELPERS ===
-    pure function format_time(ms: int) -> string {
-        let total_seconds = floor(ms / 1000);
+    pure function format_time(time: duration) -> string {
+        let total_seconds = floor(time / 1s);
         let mins = floor(total_seconds / 60);
         let secs = floor(mod(total_seconds, 60));
         return mins + ":" + (secs < 10 ? "0" : "") + secs;
@@ -122,7 +122,7 @@ export component VideoPlayerUI inherits Window {
 
                         // Current Time
                         Text {
-                            text: format_time(current_time_ms);
+                            text: format_time(current_time);
                             color: white;
                             font-size: 12px;
                             vertical-alignment: center;
@@ -131,9 +131,9 @@ export component VideoPlayerUI inherits Window {
                         // Seek Slider (Main expandable element)
                         seek-bar := SeekBar {
                             horizontal-stretch: 1;
-                            total-duration: video_duration_ms * 1ms;
-                            value: current_time_ms * 1ms;
-                            // buffer-duration: buffer_health_ms * 1ms;
+                            total-duration: video_duration;
+                            value: current_time;
+                            // buffer-duration: buffer_health;
 
                             scrubbed(duration) => {
                                 seek_changed(duration / 1ms);
@@ -142,7 +142,7 @@ export component VideoPlayerUI inherits Window {
 
                         // Duration Time
                         Text {
-                            text: format_time(video_duration_ms);
+                            text: format_time(video_duration);
                             color: white;
                             font-size: 12px;
                             vertical-alignment: center;

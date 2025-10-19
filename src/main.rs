@@ -16,7 +16,7 @@ struct DecodedFrame {
     data: Vec<u8>,
     width: u32,
     height: u32,
-    position_ms: i64,
+    position: Duration,
 }
 
 /// Video player state
@@ -25,7 +25,7 @@ struct VideoPlayer {
     appsink: gst_app::AppSink,
     width: i32,
     height: i32,
-    duration_ms: i64,
+    duration: Duration,
     framerate: f64,
     is_playing: Arc<AtomicBool>,
     is_eos: Arc<AtomicBool>,
@@ -95,20 +95,20 @@ impl VideoPlayer {
         // Get duration
         let duration = pipeline
             .query_duration::<gst::ClockTime>()
-            .map(|d| d.mseconds())
-            .unwrap_or(0);
+            .map(|d| Duration::from_millis(d.mseconds()))
+            .unwrap_or(Duration::ZERO);
 
         println!("Video info:");
         println!("  Resolution: {}x{}", width, height);
         println!("  FPS: {:.2}", fps);
-        println!("  Duration: {} ms", duration);
+        println!("  Duration: {:.2}s", duration.as_secs_f64());
 
         Ok(VideoPlayer {
             pipeline,
             appsink,
             width,
             height,
-            duration_ms: duration as i64,
+            duration,
             framerate: fps,
             is_playing: Arc::new(AtomicBool::new(false)),
             is_eos: Arc::new(AtomicBool::new(false)),
@@ -130,21 +130,21 @@ impl VideoPlayer {
         self.is_playing.store(false, Ordering::Relaxed);
     }
 
-    fn seek(&self, position_ms: i64) -> Result<()> {
+    fn seek(&self, position: Duration) -> Result<()> {
         self.pipeline
             .seek_simple(
                 gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                gst::ClockTime::from_mseconds(position_ms as u64),
+                gst::ClockTime::from_mseconds(position.as_millis() as u64),
             )
             .map_err(|_| anyhow!("Seek failed"))?;
         Ok(())
     }
 
-    fn get_position(&self) -> i64 {
+    fn get_position(&self) -> Duration {
         self.pipeline
             .query_position::<gst::ClockTime>()
-            .map(|pos| pos.mseconds() as i64)
-            .unwrap_or(0)
+            .map(|pos| Duration::from_millis(pos.mseconds()))
+            .unwrap_or(Duration::ZERO)
     }
 
     fn set_volume(&self, volume: f64) {
@@ -175,7 +175,10 @@ impl VideoPlayer {
         let height = s.get::<i32>("height").ok()? as u32;
 
         // Get position
-        let position_ms = buffer.pts().map(|pts| pts.mseconds() as i64).unwrap_or(0);
+        let position = buffer
+            .pts()
+            .map(|pts| Duration::from_millis(pts.mseconds()))
+            .unwrap_or(Duration::ZERO);
 
         // Copy RGBA data
         let data = map.as_slice().to_vec();
@@ -184,7 +187,7 @@ impl VideoPlayer {
             data,
             width,
             height,
-            position_ms,
+            position,
         })
     }
 
@@ -237,17 +240,17 @@ fn main() -> Result<()> {
     ));
 
     // Get initial metadata
-    let (width, height, duration_ms, framerate) = {
+    let (width, height, duration, framerate) = {
         let p = player.lock().unwrap();
-        (p.width, p.height, p.duration_ms, p.framerate)
+        (p.width, p.height, p.duration, p.framerate)
     };
 
     // Create Slint UI
     let ui = VideoPlayerUI::new()?;
 
-    // Set initial state
-    ui.set_video_duration_ms(duration_ms as i32);
-    ui.set_current_time_ms(0);
+    // Set initial state (converting Duration to milliseconds for Slint)
+    ui.set_video_duration(duration.as_millis() as i64);
+    ui.set_current_time(0);
     ui.set_is_playing(false);
     ui.set_volume(100);
     ui.set_is_muted(false);
@@ -258,7 +261,7 @@ fn main() -> Result<()> {
     ui.on_play_pause_clicked(move || {
         let p = player_clone.lock().unwrap();
         if p.is_eos.load(Ordering::Relaxed) {
-            if let Err(e) = p.seek(0) {
+            if let Err(e) = p.seek(Duration::ZERO) {
                 eprintln!("Seek failed: {}", e);
             }
             p.is_eos.store(false, Ordering::Relaxed);
@@ -270,11 +273,12 @@ fn main() -> Result<()> {
         }
     });
 
-    // Seek callback
+    // Seek callback (converting Slint duration to std Duration)
     let player_clone = player.clone();
     ui.on_seek_changed(move |position_ms| {
         let p = player_clone.lock().unwrap();
-        if let Err(e) = p.seek(position_ms as i64) {
+        let position = Duration::from_millis(position_ms as u64);
+        if let Err(e) = p.seek(position) {
             eprintln!("Seek failed: {}", e);
         }
         if p.is_eos.load(Ordering::Relaxed) {
@@ -342,8 +346,9 @@ fn main() -> Result<()> {
                 break;
             }
 
-            // Update UI with new frame
+            // Update UI with new frame (converting std Duration to Slint duration in ms)
             if let Some(frame) = frame_opt {
+                let position_ms = frame.position.as_millis() as i64;
                 let _ = ui_weak.upgrade_in_event_loop(move |handle| {
                     let pixel_buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
                         &frame.data,
@@ -352,19 +357,20 @@ fn main() -> Result<()> {
                     );
                     let image = Image::from_rgba8(pixel_buffer);
                     handle.set_video_frame(image);
-                    handle.set_current_time_ms(frame.position_ms as i32);
+                    handle.set_current_time(position_ms);
                     handle.set_is_playing(is_playing);
                 });
             }
 
             // Update position even if no new frame
-            let position_ms = {
+            let position = {
                 let p = player_clone.lock().unwrap();
                 p.get_position()
             };
 
+            let position_ms = position.as_millis() as i64;
             let _ = ui_weak.upgrade_in_event_loop(move |handle| {
-                handle.set_current_time_ms(position_ms as i32);
+                handle.set_current_time(position_ms);
             });
 
             // Frame timing
