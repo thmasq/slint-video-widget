@@ -169,14 +169,28 @@ export component VideoPlayerUI inherits Window {
                             }
                         }
 
-                        // Volume Slider
-                        volume_slider := Slider {
+                        Rectangle {
                             width: 100px;
-                            minimum: 0;
-                            maximum: 100;
-                            value: volume;
-                            enabled: !is_muted;
-                            changed => { volume_changed(self.value); }
+                            height: 32px;
+
+                            volume_slider := Slider {
+                                width: 100%;
+                                height: 100%;
+                                minimum: 0;
+                                maximum: 100;
+                                value: volume;
+                                enabled: !is_muted;
+                                changed => { volume_changed(self.value); }
+                            }
+                            TouchArea {
+                                width: 100%;
+                                height: 100%;
+                                mouse-cursor: pointer;
+                                clicked() => {
+                                    root.volume = clamp(self.mouse-x / parent.width, 0, 1.0) * 100;
+                                    volume_changed(root.volume);
+                                }
+                            }
                         }
 
                         // Fullscreen Button
